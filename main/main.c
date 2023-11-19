@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "driver/gpio.h"
+#include "driver/adc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -14,11 +15,13 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "sdkconfig.h"
 
-#define LED_0 GPIO_NUM_8
-#define LED_1 GPIO_NUM_1
-#define DIG_INPUT_0 GPIO_NUM_22
+#define PROXIMITY_DIG_INPUT GPIO_NUM_22 //pin 22 for digital input (infrared proximity sensor)
 
-static bool is_led_1 = false;
+#define LIGHT_INPUT_PIN ADC1_CHANNEL_0 // pin 0 used as analog input (photoresistor)
+#define LED_0 GPIO_NUM_8 // pin 8 for first LED
+#define LED_1 GPIO_NUM_1 // pin 1 for second LED
+#define LIGHT_THRESHOLD 2000 //threshold to turn on LEDs
+
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
@@ -42,24 +45,17 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     memcpy(data, data_raw, data_len);
     data[data_len] = '\0';
 
-    printf("%d\n",strcmp(data, (char *)"LIGHT ON")==0);
-    if (strcmp(data, (char *)"LIGHT ON\0")==0)
+    //control motors by reading data sent from client
+    if (strcmp(data, (char *)"1010\0")==0)
     {
-       printf("LIGHT ON\n");
+       printf("Move forward\n");
     }
-    else if (strcmp(data, (char *)"LIGHT OFF\0")==0)
+    else if (strcmp(data, (char *)"0101\0")==0)
     {
-        printf("LIGHT OFF\n");
+        printf("Move backwards\n");
     }
     else{
-        // printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
-        printf("Data from the client: %s\n", data);
-
-        //toggle LED
-        if (is_led_1) gpio_set_level(LED_1, 0);
-        else gpio_set_level(LED_1, 1);
-        is_led_1 = !is_led_1;
-        
+        printf("Unrecognized command: %s\n", data);
     }
     
     //deallocate memory
@@ -151,32 +147,59 @@ void host_task(void *param)
     nimble_port_run(); // This function will return only when nimble_port_stop() is executed
 }
 
+// Control LEDs by reading photoresistor analog voltage input
+void leds_control(){
+    int lightVoltage;
+    // Take an ADC1 reading on a single channel (ADC1_CHANNEL_0)
+    // 11dB attenuation (ADC_ATTEN_DB_11) gives full-scale voltage 0 - 3.9V
+    // 4053 ~ 3.86V
+    lightVoltage = adc1_get_raw(LIGHT_INPUT_PIN); 
+    printf("%d\n", lightVoltage);
+
+    if (lightVoltage <= LIGHT_THRESHOLD){
+        gpio_set_level(LED_0, 1); //turn LED 0 on
+        gpio_set_level(LED_1, 1); //turn LED 0 on
+    }
+
+}
+
+// Control motors when car aproaches obstacle
+void proximity_control(){
+    if (gpio_get_level(PROXIMITY_DIG_INPUT)){
+        printf("Obstacle approaching...");
+    }
+}
+
 void app_main()
 {
 
+    //set digital GPIO modes
     gpio_set_direction(LED_0, GPIO_MODE_OUTPUT);
     gpio_set_direction(LED_1, GPIO_MODE_OUTPUT);
-    gpio_set_direction(DIG_INPUT_0, GPIO_MODE_INPUT);
+    gpio_set_direction(PROXIMITY_DIG_INPUT, GPIO_MODE_INPUT);
 
-    nvs_flash_init();                          // 1 - Initialize NVS flash using
-    // esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
-    nimble_port_init();                        // 3 - Initialize the host stack
-    ble_svc_gap_device_name_set("BLE-Server"); // 4 - Initialize NimBLE configuration - server name
-    ble_svc_gap_init();                        // 4 - Initialize NimBLE configuration - gap service
-    ble_svc_gatt_init();                       // 4 - Initialize NimBLE configuration - gatt service
-    ble_gatts_count_cfg(gatt_svcs);            // 4 - Initialize NimBLE configuration - config gatt services
-    ble_gatts_add_svcs(gatt_svcs);             // 4 - Initialize NimBLE configuration - queues gatt services.
-    ble_hs_cfg.sync_cb = ble_app_on_sync;      // 5 - Initialize application
-    nimble_port_freertos_init(host_task);      // 6 - Run the thread
+    //set analog input (light sensor)
+    adc1_config_width(ADC_WIDTH_BIT_12); //Configure ADC1 capture width: 12 bit decimal value from 0 to 4095
+    adc1_config_channel_atten(LIGHT_INPUT_PIN, ADC_ATTEN_DB_11); //Configure the ADC1 channel (ADC1_CHANNEL_0), and setting attenuation (ADC_ATTEN_DB_11)
 
+    //set BLE connection
+    nvs_flash_init();                          // Initialize NVS flash using
+    nimble_port_init();                        // Initialize the host stack
+    ble_svc_gap_device_name_set("BLE-Server"); // Initialize NimBLE configuration - server name
+    ble_svc_gap_init();                        // Initialize NimBLE configuration - gap service
+    ble_svc_gatt_init();                       // Initialize NimBLE configuration - gatt service
+    ble_gatts_count_cfg(gatt_svcs);            // Initialize NimBLE configuration - config gatt services
+    ble_gatts_add_svcs(gatt_svcs);             // Initialize NimBLE configuration - queues gatt services.
+    ble_hs_cfg.sync_cb = ble_app_on_sync;      // Initialize application
+    nimble_port_freertos_init(host_task);      // Run the thread
+
+    // sensors' loop
     while(1)
     {
-        if (gpio_get_level(DIG_INPUT_0)){
-            gpio_set_level(LED_0, 1); //turn LED on
-        }
-        else{
-            gpio_set_level(LED_0, 0); //turn LED off
-        }  
-        vTaskDelay(10); //0.1 seconds delay
+        
+        leds_control();
+        proximity_control();
+
+        vTaskDelay(100 / portTICK_PERIOD_MS); //100 ms delay
     }
 }
