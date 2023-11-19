@@ -26,10 +26,22 @@ void ble_app_advertise(void);
 // Write data to ESP32 defined as server
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    // printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
+    char * data_raw = (char *)ctxt->om->om_data; //this pointer to string data is not null-terminated
+    //It is needed to add null termination to string
 
+    int data_len = ctxt->om->om_len;
+    char * data = malloc(data_len + 1);
 
-    char * data = (char *)ctxt->om->om_data;
+    if (data == NULL) {
+        // Handle allocation failure
+        fprintf(stderr, "Memory allocation failed\n");
+        return 1;
+    }
+
+    // Copy data to the new string and add null terminator
+    memcpy(data, data_raw, data_len);
+    data[data_len] = '\0';
+
     printf("%d\n",strcmp(data, (char *)"LIGHT ON")==0);
     if (strcmp(data, (char *)"LIGHT ON\0")==0)
     {
@@ -39,24 +51,20 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     {
         printf("LIGHT OFF\n");
     }
-    else if (strcmp(data, (char *)"FAN ON\0")==0)
-    {
-        printf("FAN ON\n");
-    }
-    else if (strcmp(data, (char *)"FAN OFF\0")==0)
-    {
-        printf("FAN OFF\n");
-    }
     else{
-        printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
+        // printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
+        printf("Data from the client: %s\n", data);
 
+        //toggle LED
         if (is_led_1) gpio_set_level(LED_1, 0);
         else gpio_set_level(LED_1, 1);
         is_led_1 = !is_led_1;
         
     }
     
-    
+    //deallocate memory
+    free(data);
+
     return 0;
 }
 
