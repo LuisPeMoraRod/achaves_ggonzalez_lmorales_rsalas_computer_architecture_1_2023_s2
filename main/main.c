@@ -15,8 +15,10 @@
 #include "sdkconfig.h"
 
 #define LED_0 GPIO_NUM_8
+#define LED_1 GPIO_NUM_1
+#define DIG_INPUT_0 GPIO_NUM_22
 
-
+static bool is_led_1 = false;
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
@@ -25,6 +27,7 @@ void ble_app_advertise(void);
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     // printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
+
 
     char * data = (char *)ctxt->om->om_data;
     printf("%d\n",strcmp(data, (char *)"LIGHT ON")==0);
@@ -46,6 +49,11 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     }
     else{
         printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
+
+        if (is_led_1) gpio_set_level(LED_1, 0);
+        else gpio_set_level(LED_1, 1);
+        is_led_1 = !is_led_1;
+        
     }
     
     
@@ -137,6 +145,11 @@ void host_task(void *param)
 
 void app_main()
 {
+
+    gpio_set_direction(LED_0, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_1, GPIO_MODE_OUTPUT);
+    gpio_set_direction(DIG_INPUT_0, GPIO_MODE_INPUT);
+
     nvs_flash_init();                          // 1 - Initialize NVS flash using
     // esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
     nimble_port_init();                        // 3 - Initialize the host stack
@@ -148,12 +161,9 @@ void app_main()
     ble_hs_cfg.sync_cb = ble_app_on_sync;      // 5 - Initialize application
     nimble_port_freertos_init(host_task);      // 6 - Run the thread
 
-    gpio_set_direction(LED_0, GPIO_MODE_OUTPUT);
-    gpio_set_direction(GPIO_NUM_22, GPIO_MODE_INPUT);
-
     while(1)
     {
-        if (gpio_get_level(GPIO_NUM_22)){
+        if (gpio_get_level(DIG_INPUT_0)){
             gpio_set_level(LED_0, 1); //turn LED on
         }
         else{
