@@ -7,37 +7,39 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
-// #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "sdkconfig.h"
+#include <math.h>
 
+//ESP32-C6 Data Matrix Code: 052316404CCA408E18
+//MAC: 404CCA408E18
 
-#define LIGHT_INPUT_PIN ADC1_CHANNEL_0 // pin 0 used as analog input (photoresistor)
-#define TEMP_INPUT_PIN ADC1_CHANNEL_1 // pin 1 used as analog input (termistor)
-
-#define LED_0 GPIO_NUM_8 // pin 8 for first LED
-#define LED_1 GPIO_NUM_1 // pin 1 for second LED
-
-#define MOTOR_1_A GPIO_NUM_18 // pin 18 for first pin motor driver A
-#define MOTOR_1_B GPIO_NUM_19 // pin 19 for second pin motor driver A
-#define MOTOR_2_A GPIO_NUM_20 // pin 20 for first pin motor driver B
-#define MOTOR_2_B GPIO_NUM_21 // pin 21 for second pin motor driver B
-
-#define FAN_OUT GPIO_NUM_23 //pin 23 for fan output
-
+#define LIGHT_INPUT_PIN ADC1_CHANNEL_5 // pin 5 used as analog input (photoresistor)
+#define TEMP_INPUT_PIN ADC1_CHANNEL_4 // pin 4 used as analog input (termistor)
 #define PROXIMITY_DIG_INPUT GPIO_NUM_22 //pin 22 for digital input (infrared proximity sensor)
-#define LIGHT_THRESHOLD 1500 //threshold to turn on LEDs
-#define TEMP_THRESHOLD 30.0 //threshold to turn fan out
 
+#define LEDS GPIO_NUM_8 // pin 8 for LEDs
+
+#define MOTOR_1_A GPIO_NUM_3 // pin 3 for first pin motor driver A
+#define MOTOR_2_A GPIO_NUM_2 // pin 2 for first pin motor driver B
+#define MOTOR_1_B GPIO_NUM_11 // pin 11 for second pin motor driver A
+#define MOTOR_2_B GPIO_NUM_10 // pin 10 for second pin motor driver B
+
+#define FAN_OUT GPIO_NUM_1 //pin 1 for fan output
+
+#define LIGHT_THRESHOLD 1500 //threshold to turn on LEDs
+#define TEMP_THRESHOLD 25.0 //threshold to turn fan out
 
 
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
-uint8_t lockFront = 0;
+
+static bool lock_front = false;
+static bool is_moving_forward = false;
 
 void ble_app_advertise(void);
 
@@ -61,13 +63,14 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     data[data_len] = '\0';
 
     //control motors by reading data sent from client
-    if ((strcmp(data, (char *)"1010\0")==0) && (lockFront == 0))
+    if ((strcmp(data, (char *)"1010\0")==0) && (!lock_front))
     {
         printf("Move forward\n");
         gpio_set_level(MOTOR_1_A, 1);
         gpio_set_level(MOTOR_2_A, 0);
         gpio_set_level(MOTOR_1_B, 1);
         gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = true;
 
     }
     else if (strcmp(data, (char *)"0101\0")==0)
@@ -77,22 +80,28 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         gpio_set_level(MOTOR_2_A, 1);
         gpio_set_level(MOTOR_1_B, 0);
         gpio_set_level(MOTOR_2_B, 1);
+        is_moving_forward = false;
+
     }
-    else if ((strcmp(data, (char *)"1000\0")==0)  && (lockFront == 0))
+    else if ((strcmp(data, (char *)"1000\0")==0))
     {
         printf("Move right\n");
         gpio_set_level(MOTOR_1_A, 1);
         gpio_set_level(MOTOR_2_A, 0);
         gpio_set_level(MOTOR_1_B, 0);
         gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
     }
-    else if ((strcmp(data, (char *)"0010\0")==0)  && (lockFront == 0))
+    else if ((strcmp(data, (char *)"0010\0")==0))
     {
         printf("Move left\n");
         gpio_set_level(MOTOR_1_A, 0);
         gpio_set_level(MOTOR_2_A, 0);
         gpio_set_level(MOTOR_1_B, 1);
         gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
     }
     else if (strcmp(data, (char *)"0000\0")==0)
     {
@@ -101,6 +110,8 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         gpio_set_level(MOTOR_2_A, 0);
         gpio_set_level(MOTOR_1_B, 0);
         gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
     }
     else{
         printf("Unrecognized command: %s\n", data);
@@ -202,14 +213,12 @@ void leds_control(){
     // 11dB attenuation (ADC_ATTEN_DB_11) gives full-scale voltage 0 - 3.9V
     // 4053 ~ 3.86V
     lightVoltage = adc1_get_raw(LIGHT_INPUT_PIN); 
-    printf("Current light: %d\n", lightVoltage);
+    // printf("Current light: %d\n", lightVoltage);
 
     if (lightVoltage <= LIGHT_THRESHOLD){
-        gpio_set_level(LED_0, 1); //turn LED 0 on
-        gpio_set_level(LED_1, 1); //turn LED 1 on
+        gpio_set_level(LEDS, 1); //turn LEDs on
     }else{
-        gpio_set_level(LED_0, 0); //turn LED 0 off
-        gpio_set_level(LED_1, 0); //turn LED 1 off
+        gpio_set_level(LEDS, 0); //turn LEDs off
     }
 
 }
@@ -218,9 +227,18 @@ void leds_control(){
 void proximity_control(){
     if (gpio_get_level(PROXIMITY_DIG_INPUT)){
         printf("Obstacle approaching...");
-        lockFront = 1;
+        lock_front = true;
+
+        if (is_moving_forward){
+            //stop motors
+            gpio_set_level(MOTOR_1_A, 0);
+            gpio_set_level(MOTOR_2_A, 0);
+            gpio_set_level(MOTOR_1_B, 0);
+            gpio_set_level(MOTOR_2_B, 0);
+        }
+
     } else{
-        lockFront = 0;
+        lock_front = false;
     }
 }
 
@@ -231,17 +249,17 @@ float mapFloat(float x, float in_min, float in_max, float out_min, float out_max
 
 void temperature_control(){
     /*
-    Takes the adc1 channel 1 
+    Takes the ADC1 channel 2 
     */
-    const float Rc = 10000.0; //valor de la resistencia
-    const float Vcc = 5.0;
+    const float Rc = 10000.0; //resistor value
+    const float Vcc = 5.0; 
     //const int SensorPIN = A1;
 
     float A = 1.11492089e-3;
     float B = 2.372075385e-4;
     float C = 6.954079529e-8;
 
-    float K = 2.5; //factor de disipacion en mW/C
+    float K = 2.5; //dissipation factor [mW/C]
 
     float tempVoltage = (float)adc1_get_raw(TEMP_INPUT_PIN); 
     float tempCorrected = mapFloat(tempVoltage, 0.0, 5000.0, 0.0, 1023.0);
@@ -256,22 +274,21 @@ void temperature_control(){
     float kelvin = R_th - V*V/(K * R)*1000.0;
     float celsius = kelvin - 277.15;  
 
-    printf("Current temperature: %d\n", celsius);
+    printf("Current temperature: %f\n", celsius);
     
-    if (celsius >= TEMP_THRESHOLD){
-        gpio_set_level(FAN_OUT, 1); //turn LED 0 on
+    if (celsius >= (float) TEMP_THRESHOLD){
+        printf("too hot\n");
+        gpio_set_level(FAN_OUT, 1); //turn fan on
     }else{
-        gpio_set_level(FAN_OUT, 0); //turn LED 0 on
+        gpio_set_level(FAN_OUT, 0); //turn fan off
     }
 
 }
 
 void app_main()
 {
-
-    //set digital GPIO modes
-    gpio_set_direction(LED_0, GPIO_MODE_OUTPUT);
-    gpio_set_direction(LED_1, GPIO_MODE_OUTPUT);
+    //set GPIO modes
+    gpio_set_direction(LEDS, GPIO_MODE_OUTPUT);
     gpio_set_direction(FAN_OUT, GPIO_MODE_OUTPUT);
     gpio_set_direction(PROXIMITY_DIG_INPUT, GPIO_MODE_INPUT);
     gpio_set_direction(LIGHT_INPUT_PIN, GPIO_MODE_INPUT);
@@ -305,6 +322,6 @@ void app_main()
         proximity_control();
         temperature_control();
 
-        vTaskDelay(500 / portTICK_PERIOD_MS); //100 ms delay
+        vTaskDelay(500 / portTICK_PERIOD_MS); //500 ms delay
     }
 }
