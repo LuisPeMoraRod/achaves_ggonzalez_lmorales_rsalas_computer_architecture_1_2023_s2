@@ -1,26 +1,46 @@
 #include <stdio.h>
 #include "driver/gpio.h"
+#include "driver/adc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
-// #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "sdkconfig.h"
+#include <math.h>
 
-#define LED_0 GPIO_NUM_8
-#define LED_1 GPIO_NUM_1
-#define DIG_INPUT_0 GPIO_NUM_22
+//ESP32-C6 Data Matrix Code: 052316404CCA408E18
+//MAC: 404CCA408E18
 
-static bool is_led_1 = false;
+#define LIGHT_INPUT_PIN ADC1_CHANNEL_5 // pin 5 used as analog input (photoresistor)
+#define TEMP_INPUT_PIN ADC1_CHANNEL_4 // pin 4 used as analog input (termistor)
+#define PROXIMITY_DIG_INPUT GPIO_NUM_22 //pin 22 for digital input (infrared proximity sensor)
+
+#define LEDS GPIO_NUM_8 // pin 8 for LEDs
+
+#define MOTOR_1_A GPIO_NUM_3 // pin 3 for first pin motor driver A
+#define MOTOR_2_A GPIO_NUM_2 // pin 2 for first pin motor driver B
+#define MOTOR_1_B GPIO_NUM_11 // pin 11 for second pin motor driver A
+#define MOTOR_2_B GPIO_NUM_10 // pin 10 for second pin motor driver B
+
+#define FAN_OUT GPIO_NUM_1 //pin 1 for fan output
+
+#define LIGHT_THRESHOLD 1500 //threshold to turn on LEDs
+#define TEMP_THRESHOLD 25.0 //threshold to turn fan out
+
+
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
+
+static bool lock_front = false;
+static bool is_moving_forward = false;
+
 void ble_app_advertise(void);
 
 // Write data to ESP32 defined as server
@@ -42,24 +62,59 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     memcpy(data, data_raw, data_len);
     data[data_len] = '\0';
 
-    printf("%d\n",strcmp(data, (char *)"LIGHT ON")==0);
-    if (strcmp(data, (char *)"LIGHT ON\0")==0)
+    //control motors by reading data sent from client
+    if ((strcmp(data, (char *)"1010\0")==0) && (!lock_front))
     {
-       printf("LIGHT ON\n");
+        printf("Move forward\n");
+        gpio_set_level(MOTOR_1_A, 1);
+        gpio_set_level(MOTOR_2_A, 0);
+        gpio_set_level(MOTOR_1_B, 1);
+        gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = true;
+
     }
-    else if (strcmp(data, (char *)"LIGHT OFF\0")==0)
+    else if (strcmp(data, (char *)"0101\0")==0)
     {
-        printf("LIGHT OFF\n");
+        printf("Move backwards\n");
+        gpio_set_level(MOTOR_1_A, 0);
+        gpio_set_level(MOTOR_2_A, 1);
+        gpio_set_level(MOTOR_1_B, 0);
+        gpio_set_level(MOTOR_2_B, 1);
+        is_moving_forward = false;
+
+    }
+    else if ((strcmp(data, (char *)"1000\0")==0))
+    {
+        printf("Move right\n");
+        gpio_set_level(MOTOR_1_A, 1);
+        gpio_set_level(MOTOR_2_A, 0);
+        gpio_set_level(MOTOR_1_B, 0);
+        gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
+    }
+    else if ((strcmp(data, (char *)"0010\0")==0))
+    {
+        printf("Move left\n");
+        gpio_set_level(MOTOR_1_A, 0);
+        gpio_set_level(MOTOR_2_A, 0);
+        gpio_set_level(MOTOR_1_B, 1);
+        gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
+    }
+    else if (strcmp(data, (char *)"0000\0")==0)
+    {
+        printf("Stop\n");
+        gpio_set_level(MOTOR_1_A, 0);
+        gpio_set_level(MOTOR_2_A, 0);
+        gpio_set_level(MOTOR_1_B, 0);
+        gpio_set_level(MOTOR_2_B, 0);
+        is_moving_forward = false;
+
     }
     else{
-        // printf("Data from the client: %.*s\n", ctxt->om->om_len, ctxt->om->om_data);
-        printf("Data from the client: %s\n", data);
-
-        //toggle LED
-        if (is_led_1) gpio_set_level(LED_1, 0);
-        else gpio_set_level(LED_1, 1);
-        is_led_1 = !is_led_1;
-        
+        printf("Unrecognized command: %s\n", data);
     }
     
     //deallocate memory
@@ -151,32 +206,122 @@ void host_task(void *param)
     nimble_port_run(); // This function will return only when nimble_port_stop() is executed
 }
 
+// Control LEDs by reading photoresistor analog voltage input
+void leds_control(){
+    int lightVoltage;
+    // Take an ADC1 reading on a single channel (ADC1_CHANNEL_0)
+    // 11dB attenuation (ADC_ATTEN_DB_11) gives full-scale voltage 0 - 3.9V
+    // 4053 ~ 3.86V
+    lightVoltage = adc1_get_raw(LIGHT_INPUT_PIN); 
+    // printf("Current light: %d\n", lightVoltage);
+
+    if (lightVoltage <= LIGHT_THRESHOLD){
+        gpio_set_level(LEDS, 1); //turn LEDs on
+    }else{
+        gpio_set_level(LEDS, 0); //turn LEDs off
+    }
+
+}
+
+// Control motors when car aproaches obstacle
+void proximity_control(){
+    if (gpio_get_level(PROXIMITY_DIG_INPUT)){
+        printf("Obstacle approaching...");
+        lock_front = true;
+
+        if (is_moving_forward){
+            //stop motors
+            gpio_set_level(MOTOR_1_A, 0);
+            gpio_set_level(MOTOR_2_A, 0);
+            gpio_set_level(MOTOR_1_B, 0);
+            gpio_set_level(MOTOR_2_B, 0);
+        }
+
+    } else{
+        lock_front = false;
+    }
+}
+
+
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void temperature_control(){
+    /*
+    Takes the ADC1 channel 2 
+    */
+    const float Rc = 10000.0; //resistor value
+    const float Vcc = 5.0; 
+    //const int SensorPIN = A1;
+
+    float A = 1.11492089e-3;
+    float B = 2.372075385e-4;
+    float C = 6.954079529e-8;
+
+    float K = 2.5; //dissipation factor [mW/C]
+
+    float tempVoltage = (float)adc1_get_raw(TEMP_INPUT_PIN); 
+    float tempCorrected = mapFloat(tempVoltage, 0.0, 5000.0, 0.0, 1023.0);
+    float V =  tempCorrected / 1024.0 * Vcc;
+
+    float R = (Rc * V ) / (Vcc - V);
+  
+
+    float logR  = log(R);
+    float R_th = 1.0 / (A + B * logR + C * logR * logR * logR );
+
+    float kelvin = R_th - V*V/(K * R)*1000.0;
+    float celsius = kelvin - 277.15;  
+
+    printf("Current temperature: %f\n", celsius);
+    
+    if (celsius >= (float) TEMP_THRESHOLD){
+        printf("too hot\n");
+        gpio_set_level(FAN_OUT, 1); //turn fan on
+    }else{
+        gpio_set_level(FAN_OUT, 0); //turn fan off
+    }
+
+}
+
 void app_main()
 {
+    //set GPIO modes
+    gpio_set_direction(LEDS, GPIO_MODE_OUTPUT);
+    gpio_set_direction(FAN_OUT, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PROXIMITY_DIG_INPUT, GPIO_MODE_INPUT);
+    gpio_set_direction(LIGHT_INPUT_PIN, GPIO_MODE_INPUT);
+    gpio_set_direction(TEMP_INPUT_PIN, GPIO_MODE_INPUT);
+    gpio_set_direction(MOTOR_1_A, GPIO_MODE_OUTPUT);
+    gpio_set_direction(MOTOR_1_B, GPIO_MODE_OUTPUT);
+    gpio_set_direction(MOTOR_2_A, GPIO_MODE_OUTPUT);
+    gpio_set_direction(MOTOR_2_B, GPIO_MODE_OUTPUT);
 
-    gpio_set_direction(LED_0, GPIO_MODE_OUTPUT);
-    gpio_set_direction(LED_1, GPIO_MODE_OUTPUT);
-    gpio_set_direction(DIG_INPUT_0, GPIO_MODE_INPUT);
+    //set analog input (light sensor)
+    adc1_config_width(ADC_WIDTH_BIT_12); //Configure ADC1 capture width: 12 bit decimal value from 0 to 4095
+    adc1_config_channel_atten(LIGHT_INPUT_PIN, ADC_ATTEN_DB_11); //Configure the ADC1 channel (ADC1_CHANNEL_0), and setting attenuation (ADC_ATTEN_DB_11)
+    adc1_config_channel_atten(TEMP_INPUT_PIN, ADC_ATTEN_DB_11); //Configure the ADC1 channel (ADC1_CHANNEL_1), and setting attenuation (ADC_ATTEN_DB_11)
 
-    nvs_flash_init();                          // 1 - Initialize NVS flash using
-    // esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
-    nimble_port_init();                        // 3 - Initialize the host stack
-    ble_svc_gap_device_name_set("BLE-Server"); // 4 - Initialize NimBLE configuration - server name
-    ble_svc_gap_init();                        // 4 - Initialize NimBLE configuration - gap service
-    ble_svc_gatt_init();                       // 4 - Initialize NimBLE configuration - gatt service
-    ble_gatts_count_cfg(gatt_svcs);            // 4 - Initialize NimBLE configuration - config gatt services
-    ble_gatts_add_svcs(gatt_svcs);             // 4 - Initialize NimBLE configuration - queues gatt services.
-    ble_hs_cfg.sync_cb = ble_app_on_sync;      // 5 - Initialize application
-    nimble_port_freertos_init(host_task);      // 6 - Run the thread
+    //set BLE connection
+    nvs_flash_init();                          // Initialize NVS flash using
+    nimble_port_init();                        // Initialize the host stack
+    ble_svc_gap_device_name_set("BLE-Server"); // Initialize NimBLE configuration - server name
+    ble_svc_gap_init();                        // Initialize NimBLE configuration - gap service
+    ble_svc_gatt_init();                       // Initialize NimBLE configuration - gatt service
+    ble_gatts_count_cfg(gatt_svcs);            // Initialize NimBLE configuration - config gatt services
+    ble_gatts_add_svcs(gatt_svcs);             // Initialize NimBLE configuration - queues gatt services.
+    ble_hs_cfg.sync_cb = ble_app_on_sync;      // Initialize application
+    nimble_port_freertos_init(host_task);      // Run the thread
 
+    // sensors' loop
     while(1)
     {
-        if (gpio_get_level(DIG_INPUT_0)){
-            gpio_set_level(LED_0, 1); //turn LED on
-        }
-        else{
-            gpio_set_level(LED_0, 0); //turn LED off
-        }  
-        vTaskDelay(10); //0.1 seconds delay
+        
+        leds_control();
+        proximity_control();
+        temperature_control();
+
+        vTaskDelay(500 / portTICK_PERIOD_MS); //500 ms delay
     }
 }
