@@ -274,10 +274,10 @@ void temperature_control(){
     float kelvin = R_th - V*V/(K * R)*1000.0;
     float celsius = kelvin - 277.15;  
 
-    printf("Current temperature: %f\n", celsius);
+    // printf("Current temperature: %f\n", celsius);
     
     if (celsius >= (float) TEMP_THRESHOLD){
-        printf("too hot\n");
+        // printf("too hot\n");
         gpio_set_level(FAN_OUT, 1); //turn fan on
     }else{
         gpio_set_level(FAN_OUT, 0); //turn fan off
